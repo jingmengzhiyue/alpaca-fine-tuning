@@ -62,10 +62,24 @@ python generate.py \
     --base_model 'baffo32/decapoda-research-llama-7B-hf' \
     --lora_weights 'tloen/alpaca-lora-7b'
 ```
-
+Or use the weights after local fine-tuning in the previous step
+```bash
+python generate.py \
+    --load_8bit \
+    --base_model 'baffo32/decapoda-research-llama-7B-hf' \
+    --lora_weights './Qlora-alpaca'
+```
 ### Docker Support
 
 For a seamless setup and inference process, we provide Docker and Docker Compose configurations. Follow the instructions in the README to build and run the container image.
+
+```bash
+docker build -t alpaca-lora .
+docker run --gpus=all --shm-size 64g -p 7860:7860 -v ${HOME}/.cache:/root/.cache --rm alpaca-lora generate.py \
+    --load_8bit \
+    --base_model 'baffo32/decapoda-research-llama-7B-hf' \
+    --lora_weights 'tloen/alpaca-lora-7b'
+```
 
 
 ## License

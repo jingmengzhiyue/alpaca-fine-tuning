@@ -34,7 +34,13 @@ python generate.py \
     --base_model 'baffo32/decapoda-research-llama-7B-hf' \
     --lora_weights 'tloen/alpaca-lora-7b'
 ```
-
+或者使用上一步本地微调之后的权重
+```bash
+python generate.py \
+    --load_8bit \
+    --base_model 'baffo32/decapoda-research-llama-7B-hf' \
+    --lora_weights './Qlora-alpaca'
+```
 ## Docker 部署
 
 Alpaca-fine-tuning 提供了 Docker 支持,方便部署和推理。只需构建并运行容器:
