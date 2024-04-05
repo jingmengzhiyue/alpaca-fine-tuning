@@ -2,23 +2,22 @@ import os
 import sys
 from typing import List
 
-import fire
+import fire  # CLI library for building command line interfaces
 import torch
 import transformers
-from datasets import load_dataset
+from datasets import (
+    load_dataset,
+)  # Utility for loading and processing datasets
 
-"""
-Unused imports:
-import torch.nn as nn
-import bitsandbytes as bnb
-"""
+
+# Import specific utilities for LoRA (Low-Rank Adaptation) and model preparation
 
 from peft import (
-    LoraConfig,
-    get_peft_model,
-    get_peft_model_state_dict,
-    prepare_model_for_kbit_training,
-    set_peft_model_state_dict,
+    LoraConfig,  # Configuration class for LoRA parameters
+    get_peft_model,  # Function to apply LoRA modifications to a model
+    get_peft_model_state_dict,  # Retrieves the state dict of a model with LoRA modifications
+    prepare_model_for_kbit_training,  # Retrieves the state dict of a model with LoRA modifications
+    set_peft_model_state_dict,  # Sets the state dict of a model with LoRA modifications
 )
 from transformers import LlamaForCausalLM, LlamaTokenizer
 
@@ -27,36 +26,37 @@ from utils.prompter import Prompter
 
 def train(
     # model/data params
-    base_model: str = "",  # the only required argument
-    data_path: str = "yahma/alpaca-cleaned",
-    output_dir: str = "./lora-alpaca",
+    base_model: str = "",  # the only required argument; Base model identifier for pretraining
+    data_path: str = "yahma/alpaca-cleaned",  # Path to training dataset
+    output_dir: str = "./lora-alpaca",  # Directory to save trained model and outputs
     # training hyperparams
-    batch_size: int = 128,
-    micro_batch_size: int = 4,
-    num_epochs: int = 3,
-    learning_rate: float = 3e-4,
-    cutoff_len: int = 256,
-    val_set_size: int = 2000,
+    batch_size: int = 128,  # Total batch size for training
+    micro_batch_size: int = 4,  # Batch size for each gradient accumulation step
+    num_epochs: int = 3,  # Number of epochs to train for
+    learning_rate: float = 3e-4,  # Learning rate for optimizer
+    cutoff_len: int = 256,  # Maximum sequence length for model inputs
+    val_set_size: int = 2000,  # Size of the validation set
     # lora hyperparams
-    lora_r: int = 8,
-    lora_alpha: int = 16,
-    lora_dropout: float = 0.05,
+    lora_r: int = 8,  # Rank of LoRA adjustments
+    lora_alpha: int = 16,  # Scale of LoRA adjustments
+    lora_dropout: float = 0.05,  # Dropout rate for LoRA layers
     lora_target_modules: List[str] = [
         "q_proj",
         "v_proj",
-    ],
+    ],  # Transformer modules to apply LoRA
     # llm hyperparams
-    train_on_inputs: bool = True,  # if False, masks out inputs in loss
-    add_eos_token: bool = False,
-    group_by_length: bool = False,  # faster, but produces an odd training loss curve
+    train_on_inputs: bool = True,  # Flag to determine if model trains on inputs or masks them out, if False, masks out inputs in loss
+    add_eos_token: bool = False,  # Whether to add an EOS token to each input sequence
+    group_by_length: bool = False,  # Whether to group training data by length for efficiency. faster, but produces an odd training loss curve
     # wandb params
-    wandb_project: str = "",
-    wandb_run_name: str = "",
-    wandb_watch: str = "",  # options: false | gradients | all
-    wandb_log_model: str = "",  # options: false | true
-    resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
+    wandb_project: str = "",  # Project name for Weights & Biases tracking
+    wandb_run_name: str = "",  # Run name for Weights & Biases tracking
+    wandb_watch: str = "",  # Level of model watching by Weights & Biases ('gradients', 'all', or 'false')
+    wandb_log_model: str = "",  # Flag to log model to Weights & Biases ('true' or 'false')
+    resume_from_checkpoint: str = None,  # Path to checkpoint to resume training from
     prompt_template_name: str = "alpaca",  # The prompt template to use, will default to alpaca.
 ):
+    # Prints training parameters if executed by the main process in a distributed setting
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         print(
             f"Training Alpaca-LoRA model with params:\n"
@@ -83,13 +83,16 @@ def train(
             f"resume_from_checkpoint: {resume_from_checkpoint or False}\n"
             f"prompt template: {prompt_template_name}\n"
         )
+    # Ensures that a base model is specified for training
     assert (
         base_model
     ), "Please specify a --base_model, e.g. --base_model='huggyllama/llama-7b'"
+    # Calculates the number of steps for gradient accumulation based on batch sizes
     gradient_accumulation_steps = batch_size // micro_batch_size
-
+    # Initializes the prompter with the specified template
     prompter = Prompter(prompt_template_name)
 
+    # Configuration for device mapping and Distributed Data Parallel (DDP) setup
     device_map = "auto"
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     ddp = world_size != 1
@@ -98,6 +101,7 @@ def train(
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
     # Check if parameter passed or if set within environ
+    # Configuration for Weights & Biases integration based on environment variables and arguments
     use_wandb = len(wandb_project) > 0 or (
         "WANDB_PROJECT" in os.environ and len(os.environ["WANDB_PROJECT"]) > 0
     )
@@ -108,7 +112,7 @@ def train(
         os.environ["WANDB_WATCH"] = wandb_watch
     if len(wandb_log_model) > 0:
         os.environ["WANDB_LOG_MODEL"] = wandb_log_model
-
+    # Load the model and tokenizer with specified configurations
     model = LlamaForCausalLM.from_pretrained(
         base_model,
         load_in_8bit=True,
@@ -118,6 +122,7 @@ def train(
 
     tokenizer = LlamaTokenizer.from_pretrained(base_model)
 
+    # Set tokenizer configurations for padding
     tokenizer.pad_token_id = (
         0  # unk. we want this to be different from the eos token
     )
@@ -146,6 +151,10 @@ def train(
         return result
 
     def generate_and_tokenize_prompt(data_point):
+        """
+        Functions for tokenizing prompts and data points are defined here
+        These include adjustments for EOS tokens and handling training without input tokens
+        """
         full_prompt = prompter.generate_prompt(
             data_point["instruction"],
             data_point["input"],
@@ -171,6 +180,7 @@ def train(
             ]  # could be sped up, probably
         return tokenized_full_prompt
 
+    # Model preparation for k-bit training and LoRA modifications
     model = prepare_model_for_kbit_training(model)
 
     config = LoraConfig(
@@ -183,11 +193,13 @@ def train(
     )
     model = get_peft_model(model, config)
 
+    # Loading the dataset from the specified path
     if data_path.endswith(".json") or data_path.endswith(".jsonl"):
         data = load_dataset("json", data_files=data_path)
     else:
         data = load_dataset(data_path)
 
+    # Loading model weights from checkpoint if specified
     if resume_from_checkpoint:
         # Check the available weights and load them
         checkpoint_name = os.path.join(
@@ -208,9 +220,12 @@ def train(
         else:
             print(f"Checkpoint {checkpoint_name} not found")
 
+    # Prints the percentage of trainable parameters for transparency
     model.print_trainable_parameters()  # Be more transparent about the % of trainable params.
 
+    # Splits the dataset into training and validation sets if specified
     if val_set_size > 0:
+        # Dataset split and mapping to tokenization
         train_val = data["train"].train_test_split(
             test_size=val_set_size, shuffle=True, seed=42
         )
@@ -221,14 +236,17 @@ def train(
             train_val["test"].shuffle().map(generate_and_tokenize_prompt)
         )
     else:
+        # Only training dataset mapping to tokenization
         train_data = data["train"].shuffle().map(generate_and_tokenize_prompt)
         val_data = None
 
+    # Configuration for multi-GPU training without using Distributed Data Parallel
     if not ddp and torch.cuda.device_count() > 1:
         # keeps Trainer from trying its own DataParallelism when more than 1 gpu is available
         model.is_parallelizable = True
         model.model_parallel = True
 
+    # Initializes the Hugging Face Trainer with the specified training arguments and data collator
     trainer = transformers.Trainer(
         model=model,
         train_dataset=train_data,
@@ -260,18 +278,10 @@ def train(
     )
     model.config.use_cache = False
 
-    # old_state_dict = model.state_dict
-    # model.state_dict = (
-    #     lambda self, *_, **__: get_peft_model_state_dict(
-    #         self, old_state_dict()
-    #     )
-    # ).__get__(model, type(model))
-
-    # if torch.__version__ >= "2" and sys.platform != "win32":
-    #     model = torch.compile(model)
-
+    # Starts the training process, with option to resume from a checkpoint
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
+    # Saves the trained model
     model.save_pretrained(output_dir)
 
     print(

@@ -2,6 +2,7 @@ import os
 import sys
 
 import fire
+
 # import gradio as gr
 import torch
 import transformers
@@ -11,26 +12,65 @@ from transformers import GenerationConfig, LlamaForCausalLM, LlamaTokenizer
 from utils.callbacks import Iteratorize, Stream
 from utils.prompter import Prompter
 
-if torch.cuda.is_available():
-    device = "cuda"
-else:
-    device = "cpu"
+# Determine the best device to run on
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 try:
     if torch.backends.mps.is_available():
-        device = "mps"
-except:  # noqa: E722
-    pass
+        device = "mps"  # Use Metal Performance Shaders (MPS) backend if available on macOS.
+except AttributeError:
+    pass  # MPS not available, fall back to CUDA or CPU
+
+
+def load_model(base_model, lora_weights, load_8bit, device):
+    """Loads the specified model with LoRA weights onto the given device.
+
+    Args:
+        base_model (str): Identifier for the base transformer model.
+        lora_weights (str): Path or identifier for the LoRA weights.
+        load_8bit (bool): Whether to load the model in 8-bit mode for efficiency.
+        device (torch.device): The device to load the model onto.
+
+    Returns:
+        torch.nn.Module: The loaded model.
+    """
+    # Common keyword arguments for model loading, adjusted for the target device.
+    common_kwargs = {
+        "device_map": {
+            "" if device.type in ["cuda", "mps"] else "cpu": device
+        },
+        "torch_dtype": (
+            torch.float16 if device.type in ["cuda", "mps"] else None
+        ),
+        "low_cpu_mem_usage": device.type == "cpu",
+    }
+    # Load the base transformer model.
+    model = LlamaForCausalLM.from_pretrained(
+        base_model, load_in_8bit=load_8bit, **common_kwargs
+    )
+    model = PeftModel.from_pretrained(model, lora_weights, **common_kwargs)
+    return model
 
 
 def main(
-    load_8bit: bool = False,
-    base_model: str = "",
-    lora_weights: str = "tloen/alpaca-lora-7b",
-    prompt_template: str = "",  # The prompt template to use, will default to alpaca.
-    server_name: str = "0.0.0.0",  # Allows to listen on all interfaces by providing '0.
-    share_gradio: bool = False,
+    load_8bit=False,
+    base_model="",
+    lora_weights="tloen/alpaca-lora-7b",
+    prompt_template="",
+    server_name="0.0.0.0",
+    share_gradio=False,
 ):
+    """Main function to run the text generation model with command-line interface support.
+
+    Args:
+        load_8bit (bool): Load model in 8-bit mode for efficiency.
+        base_model (str): Base model identifier for pretraining.
+        lora_weights (str): Path or identifier for LoRA weights.
+        prompt_template (str): Template name for generating prompts.
+        server_name (str): Server name for hosting the model (if using Gradio).
+        share_gradio (bool): Flag to share the Gradio app publicly.
+    """
+    # Fallback to BASE_MODEL environment variable if base_model argument is not provided.
     base_model = base_model or os.environ.get("BASE_MODEL", "")
     assert (
         base_model
@@ -38,52 +78,23 @@ def main(
 
     prompter = Prompter(prompt_template)
     tokenizer = LlamaTokenizer.from_pretrained(base_model)
-    if device == "cuda":
-        model = LlamaForCausalLM.from_pretrained(
-            base_model,
-            load_in_8bit=load_8bit,
-            torch_dtype=torch.float16,
-            device_map="auto",
-        )
-        model = PeftModel.from_pretrained(
-            model,
-            lora_weights,
-            torch_dtype=torch.float16,
-        )
-    elif device == "mps":
-        model = LlamaForCausalLM.from_pretrained(
-            base_model,
-            device_map={"": device},
-            torch_dtype=torch.float16,
-        )
-        model = PeftModel.from_pretrained(
-            model,
-            lora_weights,
-            device_map={"": device},
-            torch_dtype=torch.float16,
-        )
-    else:
-        model = LlamaForCausalLM.from_pretrained(
-            base_model, device_map={"": device}, low_cpu_mem_usage=True
-        )
-        model = PeftModel.from_pretrained(
-            model,
-            lora_weights,
-            device_map={"": device},
-        )
+    # Load the model and move it to the appropriate device.
+    model = load_model(base_model, lora_weights, load_8bit, device).to(device)
 
-    # unwind broken decapoda-research config
+    # Adjust model configuration for token IDs.
     model.config.pad_token_id = tokenizer.pad_token_id = 0  # unk
-    model.config.bos_token_id = 1
-    model.config.eos_token_id = 2
+    model.config.bos_token_id = 1 # Beginning of sequence
+    model.config.eos_token_id = 2 # End of sequence
 
     if not load_8bit:
-        model.half()  # seems to fix bugs for some users.
+        model.half()  # Convert to half precision to address potential bugs.
 
-    model.eval()
+    model.eval() # Set model to evaluation mode.
+    # Compile model for performance improvement if supported.
     if torch.__version__ >= "2" and sys.platform != "win32":
         model = torch.compile(model)
 
+    # Function to evaluate a given instruction and generate text.
     def evaluate(
         instruction,
         input=None,
@@ -145,7 +156,7 @@ def main(
                     yield prompter.get_response(decoded_output)
             return  # early return for stream_output
 
-        # Without streaming
+        # Generate text without streaming.
         with torch.no_grad():
             generation_output = model.generate(
                 input_ids=input_ids,
@@ -194,8 +205,8 @@ def main(
     #     description="Alpaca-LoRA is a 7B-parameter LLaMA model finetuned to follow instructions. It is trained on the [Stanford Alpaca](https://github.com/tatsu-lab/stanford_alpaca) dataset and makes use of the Huggingface LLaMA implementation. For more information, please visit [the project's website](https://github.com/tloen/alpaca-lora).",  # noqa: E501
     # ).queue().launch(server_name="0.0.0.0", share=share_gradio)
     # Old testing code follows.
-
-  
+    
+    # Example usage: print responses for a list of instructions.
     for instruction in [
         "Tell me about alpacas.",
         "Tell me about the president of Mexico in 2019.",
@@ -210,7 +221,6 @@ def main(
         print("Instruction:", instruction)
         print("Response:", list(evaluate(instruction)))
         print()
-
 
 
 if __name__ == "__main__":
